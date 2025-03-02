@@ -1,0 +1,11 @@
+Create an HTML web page for a gravity simulation (should be runnable by double-clicking the HTML file in Windows Explorer, i.e. should not require deploying to a web server). All numerical values described below are the defaults that should be able to be controlled by the user before the simulation begins. The simulation can be paused by the user if desired (play/pause button).
+
+The environment consists of 1000 point particles of mass 1 in a cube space that is 100 units on a side. The particles are randomly distributed to start with. The HTML page renders a 3D representation of the space with a wireframe outline of the cube and a point size proportional to the particles' mass. The user can use the mouse to rotate (orbit) around the middle of the cube (by default). The user can also click on a particle, which will cause the camera to shift so that that particle is now at the center of the view, and rotations of the camera will orbit around that position. However, when the simulation is running, the camera remains fixed (it does not move with the previously selected particle). Double-clicking anywhere in empty space restores the view to the fixed point at the middle of the cube space.
+
+The simulation has a gravitational constant parameter that defaults to a value that will cause perceptible motion for each time tick when the simulation first begins.
+
+If two or more particles come within a distance of 0.1 of each other, they merge into a single particle in a way that preserves their combined mass and linear/angular momentums (i.e. like sticky balls).
+
+If a particle hits the side of the cube space, it bounces off and loses 90% of its momentum.
+
+If possible, use techniques that will allow a 30fps simulation rate even for very high numbers of particles. Think about how to parallelize computations (for example, you can assume that beyond a certain distance, gravitational influence between two particles is neglible and can be ignored - we are not trying to be 100% accurate here) and/or use GPU resources. Don't just do a naive single-threaded CPU only implementation.

@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gravity Simulation</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        #controls { position: absolute; top: 10px; left: 10px; z-index: 100; background: rgba(0,0,0,0.5); padding: 10px; color: white; border-radius: 5px; }
+        #controls label, #controls input, #controls button { margin: 5px; }
+        .counter { font-weight: bold; margin-top: 10px; }
+        .slider-container { display: flex; flex-direction: column; margin: 10px 0; }
+        .slider-container label { margin-bottom: 5px; }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <button id="playPauseBtn">Play</button>
+        <div class="slider-container">
+            <label for="particleCount">Initial Particle Count: <span id="particleCountValue">1000</span></label>
+            <input type="range" id="particleCount" name="particleCount" min="10" max="10000" value="1000">
+        </div>
+        <div class="slider-container">
+            <label for="gravity">Gravitational Constant: <span id="gravityValue">1</span></label>
+            <input type="range" id="gravity" name="gravity" min="0" max="5" step="0.1" value="1">
+        </div>
+        <div class="slider-container">
+            <label for="rotationalVelocity">Initial Rotation: <span id="rotationalVelocityValue">0</span></label>
+            <input type="range" id="rotationalVelocity" name="rotationalVelocity" min="-1" max="1" step="0.1" value="0">
+        </div>
+        <div class="slider-container">
+            <label for="maxDistance">Max Gravity Distance: <span id="maxDistanceValue">20</span></label>
+            <input type="range" id="maxDistance" name="maxDistance" min="0" max="100" step="1" value="20">
+        </div>
+        <div class="slider-container">
+            <label for="mergeRadius">Merge Radius: <span id="mergeRadiusValue">0.1</span></label>
+            <input type="range" id="mergeRadius" name="mergeRadius" min="0.01" max="1" step="0.01" value="0.1">
+        </div>
+        <div>
+            <input type="checkbox" id="useOptimization" name="useOptimization" checked>
+            <label for="useOptimization">Use Spatial Optimization</label>
+        </div>
+        <button id="resetBtn">Reset Simulation</button>
+        <div class="counter">Particles: <span id="particleCounter">0</span></div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script>
+        // Initialize Three.js scene
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000000);
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Create the cube space with quadrilateral faces (without diagonals)
+        function createCubeWireframe() {
+            const cubeEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(100, 100, 100));
+            const cubeWireframe = new THREE.LineSegments(
+                cubeEdges,
+                new THREE.LineBasicMaterial({ color: 0x3f3f3f })
+            );
+            return cubeWireframe;
+        }
+
+        const cube = createCubeWireframe();
+        scene.add(cube);
+
+        // Create particle class to store properties
+        class Particle {
+            constructor(mesh, mass = 1) {
+                this.mesh = mesh;
+                this.mass = mass;
+                this.velocity = new THREE.Vector3(0, 0, 0);
+                this.force = new THREE.Vector3(0, 0, 0);
+                this.mesh.material = mesh.material.clone(); // Each particle gets its own material for individual coloring
+            }
+
+            updateSize() {
+                // Scale so that mass 100 has radius 1
+                // Since original particle has mass 1 and radius 0.5, we need to scale accordingly
+                // Using cube root for volume/mass relationship
+                const scale = 0.5 * Math.pow(this.mass / 1, 1/3) / Math.pow(100, 1/3) * 2;
+                this.mesh.scale.set(scale, scale, scale);
+            }
+            
+            // Update color based on speed and distance from camera
+            updateColor(camera) {
+                // Get speed (velocity magnitude)
+                const speed = this.velocity.length();
+                const maxSpeed = 10; // Adjust based on your simulation scale
+                const normalizedSpeed = Math.min(speed / maxSpeed, 1); // Clamp to [0,1]
+                
+                // Calculate color based on speed (blue to red)
+                const hue = (1 - normalizedSpeed) * 0.6; // 0.6 = blue, 0 = red in HSL
+                const color = new THREE.Color().setHSL(hue, 1, 0.5);
+                
+                // Apply distance-based intensity
+                const distance = this.mesh.position.distanceTo(camera.position);
+                const maxDistance = 200;
+                const intensity = 0.4 + 0.6 * (1 - Math.min(distance / maxDistance, 1));
+                
+                // Set the color with intensity
+                this.mesh.material.color.copy(color);
+                this.mesh.material.color.multiplyScalar(intensity);
+            }
+        }
+
+        // Initialize variables
+        let particles = [];
+        const particleGeometry = new THREE.SphereGeometry(0.5, 8, 8);
+        const particleMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+        
+        // Set camera position
+        camera.position.z = 150;
+
+        // Camera controls
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 0, 0);
+        controls.update();
+
+        // Play/Pause functionality - start paused by default
+        let isPlaying = false;
+        const playPauseBtn = document.getElementById('playPauseBtn');
+        playPauseBtn.addEventListener('click', () => {
+            isPlaying = !isPlaying;
+            playPauseBtn.textContent = isPlaying ? 'Pause' : 'Play';
+        });
+
+        // Get gravitational constant from input
+        let G = parseFloat(document.getElementById('gravity').value);
+        document.getElementById('gravity').addEventListener('input', () => {
+            G = parseFloat(document.getElementById('gravity').value);
+            document.getElementById('gravityValue').textContent = G;
+        });
+
+        // Particle count slider
+        const particleCountSlider = document.getElementById('particleCount');
+        const particleCountValue = document.getElementById('particleCountValue');
+        particleCountSlider.addEventListener('input', () => {
+            particleCountValue.textContent = particleCountSlider.value;
+        });
+
+        // Rotational velocity slider
+        let rotationalVelocity = parseFloat(document.getElementById('rotationalVelocity').value);
+        document.getElementById('rotationalVelocity').addEventListener('input', () => {
+            rotationalVelocity = parseFloat(document.getElementById('rotationalVelocity').value);
+            document.getElementById('rotationalVelocityValue').textContent = rotationalVelocity;
+        });
+
+        // Max distance slider
+        let maxDistance = parseFloat(document.getElementById('maxDistance').value);
+        document.getElementById('maxDistance').addEventListener('input', () => {
+            maxDistance = parseFloat(document.getElementById('maxDistance').value);
+            document.getElementById('maxDistanceValue').textContent = maxDistance;
+        });
+
+        // Merge radius slider
+        let mergeRadius = parseFloat(document.getElementById('mergeRadius').value);
+        document.getElementById('mergeRadius').addEventListener('input', () => {
+            mergeRadius = parseFloat(document.getElementById('mergeRadius').value);
+            document.getElementById('mergeRadiusValue').textContent = mergeRadius;
+        });
+
+        // Optimization toggle
+        let useOptimization = document.getElementById('useOptimization').checked;
+        document.getElementById('useOptimization').addEventListener('change', () => {
+            useOptimization = document.getElementById('useOptimization').checked;
+        });
+
+        // Reset button
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            resetSimulation();
+        });
+
+        // Create particles function
+        function createParticles(count) {
+            // Clear existing particles
+            particles.forEach(p => scene.remove(p.mesh));
+            particles = [];
+            
+            const rotationFactor = rotationalVelocity * 2; // Scale the rotational velocity slider value
+            
+            // Create new particles
+            for (let i = 0; i < count; i++) {
+                const particleMesh = new THREE.Mesh(particleGeometry, particleMaterial.clone());
+                
+                // Random position in the cube
+                const position = new THREE.Vector3(
+                    Math.random() * 100 - 50,
+                    Math.random() * 100 - 50,
+                    Math.random() * 100 - 50
+                );
+                particleMesh.position.copy(position);
+                
+                const particle = new Particle(particleMesh);
+                
+                // Calculate initial orbital velocity if rotationalVelocity is not 0
+                if (rotationalVelocity !== 0) {
+                    // Calculate vector from origin to particle
+                    const radiusVector = new THREE.Vector3().copy(position);
+                    const distance = radiusVector.length();
+                    
+                    if (distance > 0.1) { // Avoid division by zero or very small values
+                        // Calculate a perpendicular vector for orbital motion
+                        // Using cross product with up vector (0,1,0) as a simple way to get perpendicular vector
+                        const perpVector = new THREE.Vector3(0, 1, 0).cross(radiusVector).normalize();
+                        
+                        // If the perpendicular vector is too small (radiusVector is nearly parallel to up vector)
+                        // try a different vector for the cross product
+                        if (perpVector.length() < 0.1) {
+                            perpVector.copy(new THREE.Vector3(1, 0, 0).cross(radiusVector).normalize());
+                        }
+                        
+                        // Scale orbital velocity based on distance (so all have roughly the same orbital period)
+                        // The further from center, the faster the orbital velocity
+                        const speed = rotationFactor * Math.sqrt(distance) * 0.5;
+                        
+                        // Set the velocity
+                        particle.velocity.copy(perpVector.multiplyScalar(speed));
+                    }
+                }
+                
+                particles.push(particle);
+                scene.add(particleMesh);
+                
+                // Initial color update
+                particle.updateColor(camera);
+            }
+            
+            // Update particle counter
+            updateParticleCounter();
+        }
+
+        // Update particle counter
+        function updateParticleCounter() {
+            document.getElementById('particleCounter').textContent = particles.length;
+        }
+
+        // Reset the simulation
+        function resetSimulation() {
+            isPlaying = false;
+            playPauseBtn.textContent = 'Play';
+            createParticles(parseInt(particleCountSlider.value));
+            controls.target.set(0, 0, 0);
+            controls.update();
+        }
+
+        // Spatial partitioning for optimization
+        const CELL_SIZE = 10;
+        const GRID_SIZE = Math.ceil(100 / CELL_SIZE);
+        
+        function getGridCell(position) {
+            const x = Math.floor((position.x + 50) / CELL_SIZE);
+            const y = Math.floor((position.y + 50) / CELL_SIZE);
+            const z = Math.floor((position.z + 50) / CELL_SIZE);
+            
+            return {
+                x: Math.max(0, Math.min(GRID_SIZE - 1, x)),
+                y: Math.max(0, Math.min(GRID_SIZE - 1, y)),
+                z: Math.max(0, Math.min(GRID_SIZE - 1, z))
+            };
+        }
+
+        function createSpatialPartitioning() {
+            const grid = new Array(GRID_SIZE);
+            
+            for (let x = 0; x < GRID_SIZE; x++) {
+                grid[x] = new Array(GRID_SIZE);
+                for (let y = 0; y < GRID_SIZE; y++) {
+                    grid[x][y] = new Array(GRID_SIZE);
+                    for (let z = 0; z < GRID_SIZE; z++) {
+                        grid[x][y][z] = [];
+                    }
+                }
+            }
+            
+            // Add particles to grid
+            for (let i = 0; i < particles.length; i++) {
+                const particle = particles[i];
+                const cell = getGridCell(particle.mesh.position);
+                grid[cell.x][cell.y][cell.z].push(i);
+            }
+            
+            return grid;
+        }
+        
+        // Get neighboring cells
+        function getNeighborCells(cell) {
+            const neighbors = [];
+            
+            for (let dx = -1; dx <= 1; dx++) {
+                for (let dy = -1; dy <= 1; dy++) {
+                    for (let dz = -1; dz <= 1; dz++) {
+                        const nx = cell.x + dx;
+                        const ny = cell.y + dy;
+                        const nz = cell.z + dz;
+                        
+                        if (nx >= 0 && nx < GRID_SIZE && 
+                            ny >= 0 && ny < GRID_SIZE &&
+                            nz >= 0 && nz < GRID_SIZE) {
+                            neighbors.push({x: nx, y: ny, z: nz});
+                        }
+                    }
+                }
+            }
+            
+            return neighbors;
+        }
+
+        // Calculate forces between particles
+        function calculateForces() {
+            if (useOptimization) {
+                const grid = createSpatialPartitioning();
+                
+                // Reset forces
+                for (let i = 0; i < particles.length; i++) {
+                    particles[i].force.set(0, 0, 0);
+                }
+                
+                // Calculate forces using spatial partitioning
+                for (let i = 0; i < particles.length; i++) {
+                    const p1 = particles[i];
+                    const cell = getGridCell(p1.mesh.position);
+                    const neighborCells = getNeighborCells(cell);
+                    
+                    for (const ncell of neighborCells) {
+                        const particlesInCell = grid[ncell.x][ncell.y][ncell.z];
+                        
+                        for (const j of particlesInCell) {
+                            if (i === j) continue;
+                            
+                            const p2 = particles[j];
+                            const dx = p2.mesh.position.x - p1.mesh.position.x;
+                            const dy = p2.mesh.position.y - p1.mesh.position.y;
+                            const dz = p2.mesh.position.z - p1.mesh.position.z;
+                            const distanceSquared = dx * dx + dy * dy + dz * dz;
+                            const distance = Math.sqrt(distanceSquared);
+                            
+                            // Only consider particles within maxDistance
+                            if (distance > maxDistance) continue;
+                            
+                            if (distance > 0.1) {
+                                // Calculate gravitational force
+                                const forceMagnitude = G * p1.mass * p2.mass / distanceSquared;
+                                const forceX = forceMagnitude * dx / distance;
+                                const forceY = forceMagnitude * dy / distance;
+                                const forceZ = forceMagnitude * dz / distance;
+                                
+                                p1.force.x += forceX;
+                                p1.force.y += forceY;
+                                p1.force.z += forceZ;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Full N-body calculation
+                for (let i = 0; i < particles.length; i++) {
+                    particles[i].force.set(0, 0, 0);
+                }
+                
+                for (let i = 0; i < particles.length; i++) {
+                    const p1 = particles[i];
+                    
+                    for (let j = i + 1; j < particles.length; j++) {
+                        const p2 = particles[j];
+                        const dx = p2.mesh.position.x - p1.mesh.position.x;
+                        const dy = p2.mesh.position.y - p1.mesh.position.y;
+                        const dz = p2.mesh.position.z - p1.mesh.position.z;
+                        const distanceSquared = dx * dx + dy * dy + dz * dz;
+                        const distance = Math.sqrt(distanceSquared);
+                        
+                        // Only consider particles within maxDistance
+                        if (distance > maxDistance) continue;
+                        
+                        if (distance > 0.1) {
+                            // Calculate gravitational force
+                            const forceMagnitude = G * p1.mass * p2.mass / distanceSquared;
+                            const forceX = forceMagnitude * dx / distance;
+                            const forceY = forceMagnitude * dy / distance;
+                            const forceZ = forceMagnitude * dz / distance;
+                            
+                            p1.force.x += forceX;
+                            p1.force.y += forceY;
+                            p1.force.z += forceZ;
+                            
+                            p2.force.x -= forceX;
+                            p2.force.y -= forceY;
+                            p2.force.z -= forceZ;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update particle positions and handle collisions
+        function updateParticlePositions(deltaTime) {
+            // Update positions based on forces
+            for (let i = 0; i < particles.length; i++) {
+                const p = particles[i];
+                
+                // Update velocity (a = F/m)
+                p.velocity.x += p.force.x / p.mass * deltaTime;
+                p.velocity.y += p.force.y / p.mass * deltaTime;
+                p.velocity.z += p.force.z / p.mass * deltaTime;
+                
+                // Update position
+                p.mesh.position.x += p.velocity.x * deltaTime;
+                p.mesh.position.y += p.velocity.y * deltaTime;
+                p.mesh.position.z += p.velocity.z * deltaTime;
+                
+                // Handle collisions with cube walls (lose 90% of momentum)
+                if (Math.abs(p.mesh.position.x) > 50) {
+                    p.mesh.position.x = 50 * Math.sign(p.mesh.position.x);
+                    p.velocity.x *= -0.1; // Bounce with 90% loss
+                }
+                if (Math.abs(p.mesh.position.y) > 50) {
+                    p.mesh.position.y = 50 * Math.sign(p.mesh.position.y);
+                    p.velocity.y *= -0.1; // Bounce with 90% loss
+                }
+                if (Math.abs(p.mesh.position.z) > 50) {
+                    p.mesh.position.z = 50 * Math.sign(p.mesh.position.z);
+                    p.velocity.z *= -0.1; // Bounce with 90% loss
+                }
+            }
+        }
+
+        // Handle collisions between particles
+        function handleParticleCollisions() {
+            for (let i = 0; i < particles.length; i++) {
+                const p1 = particles[i];
+                
+                for (let j = i + 1; j < particles.length; j++) {
+                    const p2 = particles[j];
+                    
+                    const dx = p2.mesh.position.x - p1.mesh.position.x;
+                    const dy = p2.mesh.position.y - p1.mesh.position.y;
+                    const dz = p2.mesh.position.z - p1.mesh.position.z;
+                    const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                    
+                    // Merge particles if they are close enough
+                    if (distance < mergeRadius) {
+                        // Calculate total momentum
+                        const totalMomentumX = p1.mass * p1.velocity.x + p2.mass * p2.velocity.x;
+                        const totalMomentumY = p1.mass * p1.velocity.y + p2.mass * p2.velocity.y;
+                        const totalMomentumZ = p1.mass * p1.velocity.z + p2.mass * p2.velocity.z;
+                        
+                        // Calculate combined mass
+                        const combinedMass = p1.mass + p2.mass;
+                        
+                        // Calculate new position (center of mass)
+                        p1.mesh.position.x = (p1.mesh.position.x * p1.mass + p2.mesh.position.x * p2.mass) / combinedMass;
+                        p1.mesh.position.y = (p1.mesh.position.y * p1.mass + p2.mesh.position.y * p2.mass) / combinedMass;
+                        p1.mesh.position.z = (p1.mesh.position.z * p1.mass + p2.mesh.position.z * p2.mass) / combinedMass;
+                        
+                        // Calculate new velocity (conserve momentum)
+                        p1.velocity.x = totalMomentumX / combinedMass;
+                        p1.velocity.y = totalMomentumY / combinedMass;
+                        p1.velocity.z = totalMomentumZ / combinedMass;
+                        
+                        // Update mass of particle 1
+                        p1.mass = combinedMass;
+                        p1.updateSize();
+                        
+                        // Remove particle 2
+                        scene.remove(p2.mesh);
+                        particles.splice(j, 1);
+                        j--;
+                        
+                        // Update particle counter after merging
+                        updateParticleCounter();
+                    }
+                }
+            }
+        }
+
+        // Main simulation loop
+        const clock = new THREE.Clock();
+        function simulate() {
+            if (isPlaying) {
+                const deltaTime = Math.min(clock.getDelta(), 0.1); // Cap delta time to avoid large jumps
+                
+                calculateForces();
+                updateParticlePositions(deltaTime);
+                handleParticleCollisions();
+            }
+            
+            // Update particle colors based on camera distance
+            for (let i = 0; i < particles.length; i++) {
+                particles[i].updateColor(camera);
+            }
+            
+            controls.update();
+            renderer.render(scene, camera);
+            requestAnimationFrame(simulate);
+        }
+
+        // Initialize the simulation
+        resetSimulation();
+
+        // Start the clock and simulation loop
+        clock.start();
+        simulate();
+
+        // Mouse tracking for distinguishing clicks from drags
+        let isMouseDown = false;
+        let isDragging = false;
+        let mouseDownPos = { x: 0, y: 0 };
+        
+        renderer.domElement.addEventListener('mousedown', (event) => {
+            isMouseDown = true;
+            isDragging = false;
+            mouseDownPos = { x: event.clientX, y: event.clientY };
+        });
+
+        // Use the mousemove event to detect dragging
+        renderer.domElement.addEventListener('mousemove', (event) => {
+            if (!isMouseDown) return;
+            
+            const dx = event.clientX - mouseDownPos.x;
+            const dy = event.clientY - mouseDownPos.y;
+            const distance = Math.sqrt(dx*dx + dy*dy);
+            
+            // If mouse has moved more than 3 pixels, consider it a drag
+            if (distance > 3) {
+                isDragging = true;
+            }
+        });
+        
+        // Handle clean click detection
+        renderer.domElement.addEventListener('mouseup', (event) => {
+            if (isMouseDown && !isDragging) {
+                // It was a click, not a drag
+                handleParticleClick(event);
+            }
+            
+            // Reset state
+            isMouseDown = false;
+            isDragging = false;
+        });
+        
+        // Function to handle particle selection
+        function handleParticleClick(event) {
+            const mouse = new THREE.Vector2();
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            
+            const raycaster = new THREE.Raycaster();
+            raycaster.setFromCamera(mouse, camera);
+            
+            const meshes = particles.map(p => p.mesh);
+            const intersects = raycaster.intersectObjects(meshes);
+            
+            if (intersects.length > 0) {
+                const selectedMesh = intersects[0].object;
+                controls.target.copy(selectedMesh.position);
+                controls.update();
+            }
+        }
+        
+        // Handle double-click to reset view
+        renderer.domElement.addEventListener('dblclick', () => {
+            controls.target.set(0, 0, 0);
+            controls.update();
+        });
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
