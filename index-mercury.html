@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gravity Simulation</title>
+    <style>
+        body { margin: 0; }
+        canvas { display: block; }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(255, 255, 255, 0.8);
+            padding: 10px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <label for="gravitationalConstant">Gravitational Constant:</label>
+        <input type="number" id="gravitationalConstant" value="0.001" step="0.001">
+        <button id="toggleSimulation">Play</button>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const controls = document.getElementById('controls');
+        const gravitationalConstantInput = document.getElementById('gravitationalConstant');
+        const toggleSimulationButton = document.getElementById('toggleSimulation');
+
+        let isRunning = false;
+
+        // Initialize particles
+        const particles = [];
+        const particleCount = 1000;
+        const cubeSize = 100;
+        const particleMass = 1;
+        const mergeDistance = 0.1;
+        const bounceFactor = 0.9;
+
+        for (let i = 0; i < particleCount; i++) {
+            const geometry = new THREE.SphereGeometry(0.1, 32, 32);
+            const material = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+            const particle = new THREE.Mesh(geometry, material);
+            particle.position.set(
+                Math.random() * cubeSize - cubeSize / 2,
+                Math.random() * cubeSize - cubeSize / 2,
+                Math.random() * cubeSize - cubeSize / 2
+            );
+            particle.velocity = new THREE.Vector3(0, 0, 0);
+            scene.add(particle);
+            particles.push(particle);
+        }
+
+        // Add wireframe cube
+        const cubeGeometry = new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize);
+        const cubeMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, wireframe: true });
+        const cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
+        scene.add(cube);
+
+        camera.position.z = 150;
+
+        // User interactions
+        let selectedParticle = null;
+        let isDragging = false;
+        let lastMousePosition = new THREE.Vector2();
+
+        function onDocumentMouseDown(event) {
+            event.preventDefault();
+            isDragging = true;
+            lastMousePosition.set(event.clientX, event.clientY);
+        }
+
+        function onDocumentMouseMove(event) {
+            if (!isDragging) return;
+            const mouse = new THREE.Vector2();
+            mouse.set((event.clientX / window.innerWidth) * 2 - 1, -(event.clientY / window.innerHeight) * 2 + 1);
+            const delta = mouse.clone().sub(lastMousePosition);
+            lastMousePosition.copy(mouse);
+
+            if (selectedParticle) {
+                const rotationSpeed = 0.01;
+                const rotationMatrix = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(delta.y * rotationSpeed, delta.x * rotationSpeed, 0));
+                selectedParticle.quaternion.multiplyQuaternions(selectedParticle.quaternion, new THREE.Quaternion().setFromRotationMatrix(rotationMatrix));
+            } else {
+                const rotationSpeed = 0.001;
+                const rotationMatrix = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(delta.y * rotationSpeed, delta.x * rotationSpeed, 0));
+                camera.quaternion.multiplyQuaternions(camera.quaternion, new THREE.Quaternion().setFromRotationMatrix(rotationMatrix));
+            }
+        }
+
+        function onDocumentMouseUp(event) {
+            isDragging = false;
+        }
+
+        function onDocumentDoubleClick(event) {
+            if (selectedParticle) {
+                const targetPosition = selectedParticle.position.clone();
+                camera.position.copy(targetPosition);
+                camera.lookAt(targetPosition);
+                selectedParticle = null;
+            } else {
+                camera.position.set(0, 0, 150);
+                camera.lookAt(0, 0, 0);
+            }
+        }
+
+        document.addEventListener('mousedown', onDocumentMouseDown, false);
+        document.addEventListener('mousemove', onDocumentMouseMove, false);
+        document.addEventListener('mouseup', onDocumentMouseUp, false);
+        document.addEventListener('dblclick', onDocumentDoubleClick, false);
+
+        // Simulation loop
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (isRunning) {
+                const gravitationalConstant = parseFloat(gravitationalConstantInput.value);
+
+                // Update particle positions and velocities
+                for (let i = 0; i < particleCount; i++) {
+                    const particleA = particles[i];
+                    for (let j = i + 1; j < particleCount; j++) {
+                        const particleB = particles[j];
+                        const distanceVector = particleB.position.clone().sub(particleA.position);
+                        const distance = distanceVector.length();
+
+                        if (distance < mergeDistance) {
+                            // Merge particles
+                            const totalMass = particleA.mass + particleB.mass;
+                            const combinedVelocity = particleA.velocity.clone().multiplyScalar(particleA.mass).add(particleB.velocity.clone().multiplyScalar(particleB.mass)).divideScalar(totalMass);
+                            particleA.position.add(particleB.position).divideScalar(2);
+                            particleA.velocity.copy(combinedVelocity);
+                            particleA.mass = totalMass;
+                            scene.remove(particleB);
+                            particles.splice(j, 1);
+                            particleCount--;
+                            break;
+                        } else if (distance < 10) {
+                            const force = distanceVector.normalize().multiplyScalar(gravitationalConstant * particleA.mass * particleB.mass / (distance * distance));
+                            particleA.velocity.add(force.divideScalar(particleA.mass));
+                            particleB.velocity.sub(force.divideScalar(particleB.mass));
+                        }
+                    }
+                }
+
+                // Update particle positions
+                for (let i = 0; i < particleCount; i++) {
+                    const particle = particles[i];
+                    particle.position.add(particle.velocity);
+                    if (Math.abs(particle.position.x) > cubeSize / 2 || Math.abs(particle.position.y) > cubeSize / 2 || Math.abs(particle.position.z) > cubeSize / 2) {
+                        particle.velocity.multiplyScalar(bounceFactor);
+                        particle.position.clampLength(-cubeSize / 2, cubeSize / 2);
+                    }
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        toggleSimulationButton.addEventListener('click', () => {
+            isRunning = !isRunning;
+            toggleSimulationButton.textContent = isRunning ? 'Pause' : 'Play';
+        });
+
+        animate();
+    </script>
+</body>
+</html>
